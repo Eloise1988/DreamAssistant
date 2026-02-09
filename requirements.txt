@@ -1,0 +1,4 @@
+python-telegram-bot[job-queue]==21.6
+pymongo==4.10.1
+openai==1.61.1
+python-dotenv==1.0.1
