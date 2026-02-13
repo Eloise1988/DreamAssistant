@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import random
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Any
+
+try:
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+except ImportError:  # Python < 3.9
+    from backports.zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -26,6 +31,7 @@ from .content import (
     WAKE_FEELING_OPTIONS,
 )
 from .db import Database
+from .exercises import LUCID_EXERCISES
 from .llm import DreamLLM
 
 NUMERIC_QUESTION_KEYS = {"lucidity_score", "reality_checks", "rem_minutes", "deep_sleep_minutes", "total_sleep_minutes"}
@@ -37,9 +43,11 @@ class DreamDiaryBot:
         self.db = Database(self.settings.mongodb_uri, self.settings.mongodb_db)
         self.llm = DreamLLM(self.settings.openai_api_key, self.settings.openai_model)
         self.sessions: dict[int, dict[str, Any]] = {}
+        self.central_tz = self._resolve_central_timezone()
+        self.db.seed_exercises(LUCID_EXERCISES)
 
     def app(self) -> Application:
-        application = Application.builder().token(self.settings.telegram_bot_token).build()
+        application = Application.builder().token(self.settings.telegram_bot_token).post_init(self.post_init).build()
 
         application.add_handler(CommandHandler("start", self.start))
         application.add_handler(CommandHandler("menu", self.menu))
@@ -52,12 +60,53 @@ class DreamDiaryBot:
 
         return application
 
+    async def post_init(self, application: Application) -> None:
+        weekly_name = "weekly_random_exercise_all_users"
+        if not application.job_queue.get_jobs_by_name(weekly_name):
+            application.job_queue.run_repeating(
+                self.weekly_exercise_reminder,
+                interval=7 * 24 * 60 * 60,
+                first=self._next_weekday_time(timezone.utc, weekday=6, at=time(hour=9, minute=0, tzinfo=timezone.utc)),
+                name=weekly_name,
+            )
+
+        reality_check_times = [
+            time(hour=7, minute=0, tzinfo=self.central_tz),
+            time(hour=14, minute=0, tzinfo=self.central_tz),
+            time(hour=21, minute=0, tzinfo=self.central_tz),
+        ]
+        for idx, scheduled_time in enumerate(reality_check_times, start=1):
+            job_name = f"daytime_reality_check_all_users_{idx}"
+            if application.job_queue.get_jobs_by_name(job_name):
+                continue
+            application.job_queue.run_daily(
+                self.daytime_reality_check_reminder,
+                time=scheduled_time,
+                name=job_name,
+            )
+
+    def _resolve_central_timezone(self):
+        try:
+            return ZoneInfo("America/Chicago")
+        except ZoneInfoNotFoundError:
+            return timezone.utc
+
+    def _next_weekday_time(self, tz, weekday: int, at: time) -> datetime:
+        now = datetime.now(tz)
+        candidate = now.replace(hour=at.hour, minute=at.minute, second=0, microsecond=0)
+        days_ahead = (weekday - candidate.weekday()) % 7
+        candidate = candidate + timedelta(days=days_ahead)
+        if candidate <= now:
+            candidate = candidate + timedelta(days=7)
+        return candidate
+
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
         if user is None or update.message is None:
             return
 
-        self.db.ensure_user(user.id, user.username)
+        chat_id = update.effective_chat.id if update.effective_chat else None
+        self.db.ensure_user(user.id, user.username, chat_id=chat_id)
 
         text = (
             "Dream Diary activated.\n\n"
@@ -66,6 +115,8 @@ class DreamDiaryBot:
             "- Pattern detection and dream-sign tracking\n"
             "- AI interpretation and 7-day lucid protocol\n"
             "- Streak system and anti-dropout variety\n\n"
+            "Weekly random exercise reminders are sent on Sunday at 09:00 UTC.\n\n"
+            "Daily reality checks are sent 3x/day at 07:00, 14:00, and 21:00 US Central.\n\n"
             "Use the menu below."
         )
         await update.message.reply_text(text, reply_markup=self.main_menu_keyboard())
@@ -73,6 +124,10 @@ class DreamDiaryBot:
     async def menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None:
             return
+        user = update.effective_user
+        if user is not None:
+            chat_id = update.effective_chat.id if update.effective_chat else None
+            self.db.ensure_user(user.id, user.username, chat_id=chat_id)
         await update.message.reply_text("Main menu", reply_markup=self.main_menu_keyboard())
 
     async def cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -140,10 +195,52 @@ class DreamDiaryBot:
         if context.job.chat_id is not None:
             await context.bot.send_message(chat_id=context.job.chat_id, text=message)
 
+    async def weekly_exercise_reminder(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        users = self.db.get_users_with_chat_id()
+        if not users:
+            return
+
+        for user in users:
+            chat_id = user.get("chat_id")
+            if chat_id is None:
+                continue
+            exercise = self.db.get_random_exercise()
+            if not exercise:
+                return
+            text = "Weekly Lucid Exercise:\n\n" + self.format_exercise(exercise)
+            try:
+                await context.bot.send_message(chat_id=chat_id, text=text)
+            except Exception:
+                # User may have blocked the bot or chat is unavailable.
+                continue
+
+    async def daytime_reality_check_reminder(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        users = self.db.get_users_with_chat_id()
+        if not users:
+            return
+
+        question = random.choice(PROBING_QUESTIONS)
+        message = (
+            "Reality Check Reminder:\n"
+            "Pause for 20 seconds and ask: 'Am I dreaming or awake?'\n"
+            "Check for oddities, read text twice, and verify recent memory.\n"
+            f"Prompt: {question}"
+        )
+
+        for user in users:
+            chat_id = user.get("chat_id")
+            if chat_id is None:
+                continue
+            try:
+                await context.bot.send_message(chat_id=chat_id, text=message)
+            except Exception:
+                continue
+
     def main_menu_keyboard(self) -> InlineKeyboardMarkup:
         keys = [
             [InlineKeyboardButton("📝 New Dream Entry", callback_data="menu:new_entry")],
             [InlineKeyboardButton("📚 Dream Index", callback_data="menu:index")],
+            [InlineKeyboardButton("🧩 Random Exercise", callback_data="menu:exercise")],
             [InlineKeyboardButton("🧠 Interpret Last Dream", callback_data="menu:interpret")],
             [InlineKeyboardButton("🎯 7-Day Protocol", callback_data="menu:protocol")],
             [InlineKeyboardButton("🔥 Streak & Progress", callback_data="menu:stats")],
@@ -158,6 +255,8 @@ class DreamDiaryBot:
         user = update.effective_user
         if query is None or user is None:
             return
+        chat_id = update.effective_chat.id if update.effective_chat else None
+        self.db.ensure_user(user.id, user.username, chat_id=chat_id)
         await query.answer()
 
         data = query.data or ""
@@ -167,6 +266,8 @@ class DreamDiaryBot:
                 await self.begin_entry(query, user.id)
             elif action == "index":
                 await self.show_index(query, user.id)
+            elif action == "exercise":
+                await self.show_random_exercise(query, user.id)
             elif action == "interpret":
                 await self.interpret_last(query, user.id)
             elif action == "protocol":
@@ -309,6 +410,8 @@ class DreamDiaryBot:
         message = update.message
         if user is None or message is None:
             return
+        chat_id = update.effective_chat.id if update.effective_chat else None
+        self.db.ensure_user(user.id, user.username, chat_id=chat_id)
 
         session = self.sessions.get(user.id)
         if not session or session.get("mode") != "entry" or session.get("phase") != "questions":
@@ -392,6 +495,21 @@ class DreamDiaryBot:
             lines.append(f"{i}. {date} | {title} | {kinds}")
 
         await query.message.reply_text("\n".join(lines))
+
+    def format_exercise(self, exercise: dict[str, Any]) -> str:
+        title = exercise.get("title", "Untitled exercise")
+        pages = exercise.get("source_pages") or []
+        page_label = ", ".join(str(p) for p in pages) if pages else "N/A"
+        lines = exercise.get("lines") or []
+        body = "\n".join(str(line) for line in lines)
+        return f"{title}\nSource pages: {page_label}\n\n{body}".strip()
+
+    async def show_random_exercise(self, query, user_id: int) -> None:
+        exercise = self.db.get_random_exercise()
+        if not exercise:
+            await query.message.reply_text("No exercises are stored yet.")
+            return
+        await query.message.reply_text(self.format_exercise(exercise))
 
     async def interpret_last(self, query, user_id: int) -> None:
         last = self.db.get_last_entry(user_id)

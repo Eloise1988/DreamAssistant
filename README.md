@@ -7,6 +7,9 @@ Personal Telegram chat bot for advanced dream journaling, interpretation, and lu
 - Structured dream entry flow inspired by paper dream diaries
 - Multiple sections to keep users engaged and reduce dropout
 - MongoDB storage for entries, streaks, and recurring symbols
+- Lucid exercise library (stored in MongoDB) with random menu retrieval
+- Weekly random exercise reminder (Sunday 09:00 UTC)
+- Reality-check reminder 3x/day (07:00, 14:00, 21:00 US Central)
 - ChatGPT-powered dream interpretation and adaptive 7-day lucid protocol
 - Daily reminder scheduling (`/set_reminder HH:MM` in UTC)
 

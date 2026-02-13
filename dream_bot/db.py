@@ -13,14 +13,23 @@ class Database:
         self.db = self.client[db_name]
         self.users: Collection = self.db["users"]
         self.entries: Collection = self.db["dream_entries"]
+        self.exercises: Collection = self.db["lucid_exercises"]
         self._ensure_indexes()
 
     def _ensure_indexes(self) -> None:
         self.users.create_index("telegram_id", unique=True)
         self.entries.create_index([("telegram_id", 1), ("created_at", -1)])
+        self.exercises.create_index("slug", unique=True)
 
-    def ensure_user(self, telegram_id: int, username: str | None) -> dict[str, Any]:
+    def ensure_user(self, telegram_id: int, username: str | None, chat_id: int | None = None) -> dict[str, Any]:
         now = datetime.now(timezone.utc)
+        updates = {
+            "username": username,
+            "updated_at": now,
+        }
+        if chat_id is not None:
+            updates["chat_id"] = chat_id
+
         self.users.update_one(
             {"telegram_id": telegram_id},
             {
@@ -29,10 +38,7 @@ class Database:
                     "created_at": now,
                     "streak": 0,
                 },
-                "$set": {
-                    "username": username,
-                    "updated_at": now,
-                },
+                "$set": updates,
             },
             upsert=True,
         )
@@ -55,6 +61,35 @@ class Database:
 
     def get_recent_entries(self, telegram_id: int, limit: int = 30) -> list[dict[str, Any]]:
         return list(self.entries.find({"telegram_id": telegram_id}).sort("created_at", -1).limit(limit))
+
+    def seed_exercises(self, exercises: list[dict[str, Any]]) -> int:
+        now = datetime.now(timezone.utc)
+        inserted = 0
+        for exercise in exercises:
+            slug = str(exercise.get("slug", "")).strip()
+            if not slug:
+                continue
+            result = self.exercises.update_one(
+                {"slug": slug},
+                {
+                    "$set": {
+                        **exercise,
+                        "updated_at": now,
+                    },
+                    "$setOnInsert": {"created_at": now},
+                },
+                upsert=True,
+            )
+            if result.upserted_id is not None:
+                inserted += 1
+        return inserted
+
+    def get_random_exercise(self) -> dict[str, Any] | None:
+        rows = list(self.exercises.aggregate([{"$sample": {"size": 1}}]))
+        return rows[0] if rows else None
+
+    def get_users_with_chat_id(self) -> list[dict[str, Any]]:
+        return list(self.users.find({"chat_id": {"$exists": True}}, {"telegram_id": 1, "chat_id": 1, "_id": 0}))
 
     def get_stats(self, telegram_id: int) -> dict[str, Any]:
         entries_30 = self.get_recent_entries(telegram_id, limit=30)
