@@ -50,6 +50,13 @@ ENTRY_QUESTIONS = [
     ("total_sleep_minutes", "Total sleep time in minutes (number)."),
 ]
 
+NO_RECALL_ENTRY_QUESTIONS = [
+    ("rem_minutes", "Estimated REM sleep time in minutes (number)."),
+    ("deep_sleep_minutes", "Estimated deep sleep time in minutes (number)."),
+    ("total_sleep_minutes", "How many minutes did you sleep in total? (number)"),
+    ("sleep_notes", "Any comments you'd like to add? (optional)"),
+]
+
 DREAM_TYPE_OPTIONS = [
     "Mundane",
     "Lucid",

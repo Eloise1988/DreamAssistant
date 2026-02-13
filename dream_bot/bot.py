@@ -19,6 +19,7 @@ from .content import (
     DREAM_TYPE_OPTIONS,
     DREAM_TYPES_GUIDE,
     ENTRY_QUESTIONS,
+    NO_RECALL_ENTRY_QUESTIONS,
     PROBING_QUESTIONS,
     RECALL_TIPS,
     SLEEP_QUALITY_OPTIONS,
@@ -26,6 +27,8 @@ from .content import (
 )
 from .db import Database
 from .llm import DreamLLM
+
+NUMERIC_QUESTION_KEYS = {"lucidity_score", "reality_checks", "rem_minutes", "deep_sleep_minutes", "total_sleep_minutes"}
 
 
 class DreamDiaryBot:
@@ -189,19 +192,26 @@ class DreamDiaryBot:
                 "dream_types": [],
                 "sleep_quality": [],
                 "wake_feeling": [],
+                "no_dream_recall": False,
             },
             "q_index": 0,
+            "questions": ENTRY_QUESTIONS,
         }
         await query.message.reply_text(
-            "Step 1/4: Select dream types, then press Done.",
-            reply_markup=self.build_toggle_keyboard("dream_types", DREAM_TYPE_OPTIONS, []),
+            "Step 1/4: Select dream types, then press Done.\n"
+            "If you do not remember any dream, tap 'I don't remember any dreams'.",
+            reply_markup=self.build_toggle_keyboard("dream_types", DREAM_TYPE_OPTIONS, [], allow_no_recall=True),
         )
 
-    def build_toggle_keyboard(self, category: str, options: list[str], selected: list[str]) -> InlineKeyboardMarkup:
+    def build_toggle_keyboard(
+        self, category: str, options: list[str], selected: list[str], allow_no_recall: bool = False
+    ) -> InlineKeyboardMarkup:
         rows = []
         for option in options:
             mark = "✅ " if option in selected else "⬜ "
             rows.append([InlineKeyboardButton(mark + option, callback_data=f"pick:{category}:toggle:{option}")])
+        if category == "dream_types" and allow_no_recall:
+            rows.append([InlineKeyboardButton("I don't remember any dreams", callback_data="pick:dream_types:no_recall")])
         rows.append([InlineKeyboardButton("Done", callback_data=f"pick:{category}:done")])
         return InlineKeyboardMarkup(rows)
 
@@ -229,13 +239,33 @@ class DreamDiaryBot:
                 "wake_feeling": WAKE_FEELING_OPTIONS,
             }
             await query.edit_message_reply_markup(
-                reply_markup=self.build_toggle_keyboard(category, options_map[category], current)
+                reply_markup=self.build_toggle_keyboard(
+                    category,
+                    options_map[category],
+                    current,
+                    allow_no_recall=category == "dream_types",
+                )
+            )
+            return
+
+        if action == "no_recall" and category == "dream_types":
+            payload["no_dream_recall"] = True
+            payload["dream_types"] = []
+            session["questions"] = NO_RECALL_ENTRY_QUESTIONS
+            session["phase"] = "sleep_quality"
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.message.reply_text(
+                "No problem. We'll log sleep details for correlation.\n"
+                "Step 2/4: Select sleep quality.",
+                reply_markup=self.build_toggle_keyboard("sleep_quality", SLEEP_QUALITY_OPTIONS, payload["sleep_quality"]),
             )
             return
 
         if action == "done":
             await query.edit_message_reply_markup(reply_markup=None)
             if category == "dream_types":
+                payload["no_dream_recall"] = False
+                session["questions"] = ENTRY_QUESTIONS
                 session["phase"] = "sleep_quality"
                 await query.message.reply_text(
                     "Step 2/4: Select sleep quality.",
@@ -251,21 +281,28 @@ class DreamDiaryBot:
                 return
             if category == "wake_feeling":
                 session["phase"] = "questions"
-                await query.message.reply_text("Step 4/4: free-text details. Type /cancel anytime.")
+                step_4 = "Step 4/4: free-text details. Type /cancel anytime."
+                if payload.get("no_dream_recall"):
+                    step_4 = "Step 4/4: sleep details for no-recall logging. Type /cancel anytime."
+                await query.message.reply_text(step_4)
                 await self.ask_next_question(query.message.chat_id, query.message.get_bot(), user_id)
+
+    def active_questions(self, session: dict[str, Any]) -> list[tuple[str, str]]:
+        return session.get("questions", ENTRY_QUESTIONS)
 
     async def ask_next_question(self, chat_id: int, bot, user_id: int) -> None:
         session = self.sessions.get(user_id)
         if not session:
             return
 
+        questions = self.active_questions(session)
         idx = session.get("q_index", 0)
-        if idx >= len(ENTRY_QUESTIONS):
+        if idx >= len(questions):
             await self.finish_entry(chat_id, bot, user_id)
             return
 
-        _, prompt = ENTRY_QUESTIONS[idx]
-        await bot.send_message(chat_id=chat_id, text=f"Q{idx + 1}/{len(ENTRY_QUESTIONS)}: {prompt}")
+        _, prompt = questions[idx]
+        await bot.send_message(chat_id=chat_id, text=f"Q{idx + 1}/{len(questions)}: {prompt}")
 
     async def on_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
@@ -281,11 +318,16 @@ class DreamDiaryBot:
             )
             return
 
+        questions = self.active_questions(session)
         idx = session.get("q_index", 0)
-        key, _ = ENTRY_QUESTIONS[idx]
+        if idx >= len(questions):
+            await self.finish_entry(message.chat_id, context.bot, user.id)
+            return
+
+        key, _ = questions[idx]
 
         value = message.text.strip()
-        if key in {"lucidity_score", "reality_checks", "rem_minutes", "deep_sleep_minutes", "total_sleep_minutes"}:
+        if key in NUMERIC_QUESTION_KEYS:
             if not value.isdigit():
                 await message.reply_text("Please enter a number.")
                 return
@@ -303,6 +345,20 @@ class DreamDiaryBot:
         payload["entry_date"] = datetime.now(timezone.utc).date().isoformat()
         entry_id = self.db.save_entry(user_id, payload)
         self.sessions.pop(user_id, None)
+
+        if payload.get("no_dream_recall"):
+            summary = (
+                f"No-recall night saved. ID: {entry_id}\n"
+                f"Sleep quality: {', '.join(payload.get('sleep_quality', [])) or 'N/A'}\n"
+                f"Wake feeling: {', '.join(payload.get('wake_feeling', [])) or 'N/A'}\n"
+                f"REM: {payload.get('rem_minutes', 'N/A')} min | "
+                f"Deep: {payload.get('deep_sleep_minutes', 'N/A')} min | "
+                f"Total sleep: {payload.get('total_sleep_minutes', 'N/A')} min"
+            )
+            if payload.get("sleep_notes"):
+                summary += f"\nComment: {payload['sleep_notes']}"
+            await bot.send_message(chat_id=chat_id, text=summary, reply_markup=self.main_menu_keyboard())
+            return
 
         summary = (
             f"Dream saved. ID: {entry_id}\n"
@@ -327,8 +383,12 @@ class DreamDiaryBot:
         lines = ["Dream Index (latest 12):"]
         for i, item in enumerate(entries, start=1):
             date = item.get("entry_date") or item.get("created_at", "")
-            title = item.get("title", "Untitled")
-            kinds = ", ".join(item.get("dream_types", []))
+            if item.get("no_dream_recall"):
+                title = "No recall"
+                kinds = f"Sleep-only ({item.get('total_sleep_minutes', 'N/A')} min)"
+            else:
+                title = item.get("title", "Untitled")
+                kinds = ", ".join(item.get("dream_types", []))
             lines.append(f"{i}. {date} | {title} | {kinds}")
 
         await query.message.reply_text("\n".join(lines))
@@ -337,6 +397,11 @@ class DreamDiaryBot:
         last = self.db.get_last_entry(user_id)
         if not last:
             await query.message.reply_text("No dream found. Save one first.")
+            return
+        if last.get("no_dream_recall"):
+            await query.message.reply_text(
+                "Latest entry is a no-recall sleep log, so there is no dream narrative to interpret."
+            )
             return
         await query.message.reply_text("Generating interpretation...")
         text = self.llm.interpret_dream(last)
@@ -362,11 +427,17 @@ class DreamDiaryBot:
     async def show_stats(self, query, user_id: int) -> None:
         stats = self.db.get_stats(user_id)
         symbols = ", ".join([f"{k}({v})" for k, v in stats["top_symbols"]]) or "No recurring symbols yet"
+        avg_recalled = f"{stats['avg_sleep_recalled']} min" if stats["avg_sleep_recalled"] is not None else "N/A"
+        avg_no_recall = f"{stats['avg_sleep_no_recall']} min" if stats["avg_sleep_no_recall"] is not None else "N/A"
         text = (
             "Progress Snapshot:\n"
             f"- 30-day entries: {stats['entries_30']}\n"
+            f"- 30-day recalled dreams: {stats['recalled_30']}\n"
+            f"- 30-day no-recall logs: {stats['no_recall_30']}\n"
             f"- 30-day lucid count: {stats['lucid_30']}\n"
             f"- Lucid ratio: {stats['lucid_ratio']}%\n"
+            f"- Avg sleep when dreams recalled: {avg_recalled}\n"
+            f"- Avg sleep when not recalled: {avg_no_recall}\n"
             f"- Current streak: {stats['streak']} days\n"
             f"- Top recurring symbols: {symbols}"
         )

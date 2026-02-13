@@ -58,9 +58,11 @@ class Database:
 
     def get_stats(self, telegram_id: int) -> dict[str, Any]:
         entries_30 = self.get_recent_entries(telegram_id, limit=30)
-        lucid_count = sum(1 for e in entries_30 if "Lucid" in e.get("dream_types", []))
+        recalled_entries = [e for e in entries_30 if not e.get("no_dream_recall", False)]
+        no_recall_entries = [e for e in entries_30 if e.get("no_dream_recall", False)]
+        lucid_count = sum(1 for e in recalled_entries if "Lucid" in e.get("dream_types", []))
         recurring = {}
-        for e in entries_30:
+        for e in recalled_entries:
             symbols = str(e.get("symbols", "")).split(",")
             for raw in symbols:
                 s = raw.strip().lower()
@@ -69,10 +71,20 @@ class Database:
         top_symbols = sorted(recurring.items(), key=lambda it: it[1], reverse=True)[:5]
         user = self.users.find_one({"telegram_id": telegram_id}) or {}
 
+        def average_sleep_minutes(rows: list[dict[str, Any]]) -> float | None:
+            values = [v for v in (row.get("total_sleep_minutes") for row in rows) if isinstance(v, int)]
+            if not values:
+                return None
+            return round(sum(values) / len(values), 1)
+
         return {
             "entries_30": len(entries_30),
+            "recalled_30": len(recalled_entries),
+            "no_recall_30": len(no_recall_entries),
             "lucid_30": lucid_count,
-            "lucid_ratio": round((lucid_count / len(entries_30)) * 100, 1) if entries_30 else 0,
+            "lucid_ratio": round((lucid_count / len(recalled_entries)) * 100, 1) if recalled_entries else 0,
+            "avg_sleep_recalled": average_sleep_minutes(recalled_entries),
+            "avg_sleep_no_recall": average_sleep_minutes(no_recall_entries),
             "streak": int(user.get("streak", 0)),
             "top_symbols": top_symbols,
         }
