@@ -5,6 +5,7 @@ from typing import Any
 
 from pymongo import MongoClient
 from pymongo.collection import Collection
+from pymongo.errors import DuplicateKeyError
 
 
 class Database:
@@ -14,12 +15,15 @@ class Database:
         self.users: Collection = self.db["users"]
         self.entries: Collection = self.db["dream_entries"]
         self.exercises: Collection = self.db["lucid_exercises"]
+        self.reality_checks: Collection = self.db["reality_check_validations"]
         self._ensure_indexes()
 
     def _ensure_indexes(self) -> None:
         self.users.create_index("telegram_id", unique=True)
         self.entries.create_index([("telegram_id", 1), ("created_at", -1)])
         self.exercises.create_index("slug", unique=True)
+        self.reality_checks.create_index([("telegram_id", 1), ("reminder_key", 1)], unique=True)
+        self.reality_checks.create_index([("telegram_id", 1), ("local_date", 1)])
 
     def ensure_user(self, telegram_id: int, username: str | None, chat_id: int | None = None) -> dict[str, Any]:
         now = datetime.now(timezone.utc)
@@ -90,6 +94,23 @@ class Database:
 
     def get_users_with_chat_id(self) -> list[dict[str, Any]]:
         return list(self.users.find({"chat_id": {"$exists": True}}, {"telegram_id": 1, "chat_id": 1, "_id": 0}))
+
+    def record_reality_check(self, telegram_id: int, reminder_key: str, local_date: str) -> bool:
+        now = datetime.now(timezone.utc)
+        payload = {
+            "telegram_id": telegram_id,
+            "reminder_key": reminder_key,
+            "local_date": local_date,
+            "created_at": now,
+        }
+        try:
+            self.reality_checks.insert_one(payload)
+        except DuplicateKeyError:
+            return False
+        return True
+
+    def get_reality_check_count(self, telegram_id: int, local_date: str) -> int:
+        return int(self.reality_checks.count_documents({"telegram_id": telegram_id, "local_date": local_date}))
 
     def get_stats(self, telegram_id: int) -> dict[str, Any]:
         entries_30 = self.get_recent_entries(telegram_id, limit=30)

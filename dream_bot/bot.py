@@ -100,6 +100,12 @@ class DreamDiaryBot:
             candidate = candidate + timedelta(days=7)
         return candidate
 
+    def central_today_iso(self) -> str:
+        return datetime.now(self.central_tz).date().isoformat()
+
+    def central_yesterday_iso(self) -> str:
+        return (datetime.now(self.central_tz).date() - timedelta(days=1)).isoformat()
+
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
         if user is None or update.message is None:
@@ -114,9 +120,11 @@ class DreamDiaryBot:
             "- Structured nightly journal\n"
             "- Pattern detection and dream-sign tracking\n"
             "- AI interpretation and 7-day lucid protocol\n"
+            "- Blockage finder (Depth, Cognitive, Threat frameworks)\n"
             "- Streak system and anti-dropout variety\n\n"
             "Weekly random exercise reminders are sent on Sunday at 09:00 UTC.\n\n"
             "Daily reality checks are sent 3x/day at 07:00, 14:00, and 21:00 US Central.\n\n"
+            "Reality checks count only when you tap the reminder validation button.\n\n"
             "Use the menu below."
         )
         await update.message.reply_text(text, reply_markup=self.main_menu_keyboard())
@@ -219,11 +227,19 @@ class DreamDiaryBot:
         if not users:
             return
 
+        local_date = self.central_today_iso()
+        slot = "0"
+        if context.job is not None and context.job.name:
+            slot = context.job.name.rsplit("_", 1)[-1]
+        callback_data = f"check:v:{local_date}:{slot}"
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Validate check ✅", callback_data=callback_data)]])
+
         question = random.choice(PROBING_QUESTIONS)
         message = (
             "Reality Check Reminder:\n"
             "Pause for 20 seconds and ask: 'Am I dreaming or awake?'\n"
             "Check for oddities, read text twice, and verify recent memory.\n"
+            "Tap 'Validate check' after you actually complete it.\n"
             f"Prompt: {question}"
         )
 
@@ -232,9 +248,34 @@ class DreamDiaryBot:
             if chat_id is None:
                 continue
             try:
-                await context.bot.send_message(chat_id=chat_id, text=message)
+                await context.bot.send_message(chat_id=chat_id, text=message, reply_markup=keyboard)
             except Exception:
                 continue
+
+    async def handle_reality_check_callback(self, query, user_id: int, data: str) -> None:
+        parts = data.split(":")
+        if len(parts) != 4 or parts[1] != "v":
+            if query.message is not None:
+                await query.message.reply_text("Invalid validation action.")
+            return
+
+        _, _, local_date, slot = parts
+        reminder_key = f"{local_date}:{slot}"
+        recorded = self.db.record_reality_check(user_id, reminder_key, local_date)
+        if not recorded:
+            if query.message is not None:
+                await query.message.reply_text("Already validated for this reminder.")
+            return
+
+        today_count = self.db.get_reality_check_count(user_id, local_date)
+        if query.message is not None:
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            await query.message.reply_text(
+                f"Reality check validated for {local_date}. Today's validated count: {today_count}"
+            )
 
     def main_menu_keyboard(self) -> InlineKeyboardMarkup:
         keys = [
@@ -243,6 +284,7 @@ class DreamDiaryBot:
             [InlineKeyboardButton("🧩 Random Exercise", callback_data="menu:exercise")],
             [InlineKeyboardButton("🧠 Interpret Last Dream", callback_data="menu:interpret")],
             [InlineKeyboardButton("🎯 7-Day Protocol", callback_data="menu:protocol")],
+            [InlineKeyboardButton("🧱 Blockage Finder", callback_data="menu:blockages")],
             [InlineKeyboardButton("🔥 Streak & Progress", callback_data="menu:stats")],
             [InlineKeyboardButton("🛠 Reality Check Drill", callback_data="menu:drill")],
             [InlineKeyboardButton("💡 Helpful Tips", callback_data="menu:tips")],
@@ -260,6 +302,10 @@ class DreamDiaryBot:
         await query.answer()
 
         data = query.data or ""
+        if data.startswith("check:"):
+            await self.handle_reality_check_callback(query, user.id, data)
+            return
+
         if data.startswith("menu:"):
             action = data.split(":", 1)[1]
             if action == "new_entry":
@@ -272,6 +318,8 @@ class DreamDiaryBot:
                 await self.interpret_last(query, user.id)
             elif action == "protocol":
                 await self.show_protocol(query, user.id)
+            elif action == "blockages":
+                await self.show_blockages(query, user.id)
             elif action == "stats":
                 await self.show_stats(query, user.id)
             elif action == "drill":
@@ -286,6 +334,8 @@ class DreamDiaryBot:
             await self.handle_picker_callback(query, user.id, data)
 
     async def begin_entry(self, query, user_id: int) -> None:
+        reality_checks_date = self.central_yesterday_iso()
+        validated_checks = self.db.get_reality_check_count(user_id, reality_checks_date)
         self.sessions[user_id] = {
             "mode": "entry",
             "phase": "dream_types",
@@ -293,10 +343,12 @@ class DreamDiaryBot:
                 "dream_types": [],
                 "sleep_quality": [],
                 "wake_feeling": [],
+                "reality_checks": validated_checks,
                 "no_dream_recall": False,
             },
             "q_index": 0,
             "questions": ENTRY_QUESTIONS,
+            "reality_checks_date": reality_checks_date,
         }
         await query.message.reply_text(
             "Step 1/4: Select dream types, then press Done.\n"
@@ -398,12 +450,26 @@ class DreamDiaryBot:
 
         questions = self.active_questions(session)
         idx = session.get("q_index", 0)
-        if idx >= len(questions):
-            await self.finish_entry(chat_id, bot, user_id)
+        while idx < len(questions):
+            key, prompt = questions[idx]
+            if key == "reality_checks" and "reality_checks" in session["data"]:
+                count = session["data"]["reality_checks"]
+                counted_for = session.get("reality_checks_date", "yesterday")
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        f"Q{idx + 1}/{len(questions)}: Validated reality checks for {counted_for}: {count}.\n"
+                        "Auto-filled from reminder validations."
+                    ),
+                )
+                session["q_index"] = idx + 1
+                idx = session["q_index"]
+                continue
+
+            await bot.send_message(chat_id=chat_id, text=f"Q{idx + 1}/{len(questions)}: {prompt}")
             return
 
-        _, prompt = questions[idx]
-        await bot.send_message(chat_id=chat_id, text=f"Q{idx + 1}/{len(questions)}: {prompt}")
+        await self.finish_entry(chat_id, bot, user_id)
 
     async def on_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
@@ -468,10 +534,17 @@ class DreamDiaryBot:
             f"Title: {payload.get('title', 'Untitled')}\n"
             f"Types: {', '.join(payload.get('dream_types', [])) or 'N/A'}\n"
             f"Lucidity score: {payload.get('lucidity_score', 'N/A')}\n"
+            f"Reality checks (yesterday): {payload.get('reality_checks', 'N/A')}\n"
             f"REM: {payload.get('rem_minutes', 'N/A')} min | "
             f"Deep: {payload.get('deep_sleep_minutes', 'N/A')} min | "
             f"Total: {payload.get('total_sleep_minutes', 'N/A')} min"
         )
+        try:
+            blockage_paragraph = self.llm.potential_blockages_paragraph(payload)
+        except Exception:
+            blockage_paragraph = ""
+        if blockage_paragraph:
+            summary += f"\n\nPotential blockages:\n{blockage_paragraph}"
         await bot.send_message(chat_id=chat_id, text=summary, reply_markup=self.main_menu_keyboard())
 
         interpretation = self.llm.interpret_dream(payload)
@@ -541,6 +614,18 @@ class DreamDiaryBot:
 
         ai_plan = self.llm.protocol_plan(stats, recent)
         await query.message.reply_text(ai_plan)
+
+    async def show_blockages(self, query, user_id: int) -> None:
+        recent = self.db.get_recent_entries(user_id, limit=20)
+        recalled = [r for r in recent if not r.get("no_dream_recall")]
+        if not recalled:
+            await query.message.reply_text("I need at least one recalled dream entry to map blockages.")
+            return
+
+        await query.message.reply_text("Analyzing blockages with depth/cognitive/threat frameworks...")
+        stats = self.db.get_stats(user_id)
+        text = self.llm.blockage_scan(stats, recalled)
+        await query.message.reply_text(text)
 
     async def show_stats(self, query, user_id: int) -> None:
         stats = self.db.get_stats(user_id)

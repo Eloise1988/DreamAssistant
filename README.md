@@ -10,6 +10,8 @@ Personal Telegram chat bot for advanced dream journaling, interpretation, and lu
 - Lucid exercise library (stored in MongoDB) with random menu retrieval
 - Weekly random exercise reminder (Sunday 09:00 UTC)
 - Reality-check reminder 3x/day (07:00, 14:00, 21:00 US Central)
+- Reality checks count only after tapping reminder validation; dream entry auto-fills yesterday's validated count
+- Blockage finder using depth (Freud/Jung), cognitive (Domhoff), and threat simulation (Revonsuo) lenses
 - ChatGPT-powered dream interpretation and adaptive 7-day lucid protocol
 - Daily reminder scheduling (`/set_reminder HH:MM` in UTC)
 
