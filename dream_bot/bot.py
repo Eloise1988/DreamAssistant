@@ -106,7 +106,43 @@ class DreamDiaryBot:
     def central_yesterday_iso(self) -> str:
         return (datetime.now(self.central_tz).date() - timedelta(days=1)).isoformat()
 
+    def is_authorized(self, user_id: int | None, chat_id: int | None) -> bool:
+        if self.settings.allowed_telegram_user_id is not None and user_id != self.settings.allowed_telegram_user_id:
+            return False
+        if self.settings.allowed_chat_id is not None and chat_id != self.settings.allowed_chat_id:
+            return False
+        return True
+
+    async def reject_if_unauthorized(self, update: Update) -> bool:
+        user_id = update.effective_user.id if update.effective_user is not None else None
+        chat_id = update.effective_chat.id if update.effective_chat is not None else None
+        if self.is_authorized(user_id, chat_id):
+            return False
+
+        if update.callback_query is not None:
+            try:
+                await update.callback_query.answer("Unauthorized.")
+            except Exception:
+                pass
+            if update.callback_query.message is not None:
+                await update.callback_query.message.reply_text("Unauthorized chat/user for this bot.")
+            return True
+
+        if update.message is not None:
+            await update.message.reply_text("Unauthorized chat/user for this bot.")
+        return True
+
+    def reminder_targets(self) -> list[dict[str, Any]]:
+        users = self.db.get_users_with_chat_id()
+        return [
+            row
+            for row in users
+            if self.is_authorized(row.get("telegram_id"), row.get("chat_id"))
+        ]
+
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if await self.reject_if_unauthorized(update):
+            return
         user = update.effective_user
         if user is None or update.message is None:
             return
@@ -130,6 +166,8 @@ class DreamDiaryBot:
         await update.message.reply_text(text, reply_markup=self.main_menu_keyboard())
 
     async def menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if await self.reject_if_unauthorized(update):
+            return
         if update.message is None:
             return
         user = update.effective_user
@@ -139,6 +177,8 @@ class DreamDiaryBot:
         await update.message.reply_text("Main menu", reply_markup=self.main_menu_keyboard())
 
     async def cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if await self.reject_if_unauthorized(update):
+            return
         user = update.effective_user
         if user is None or update.message is None:
             return
@@ -146,6 +186,8 @@ class DreamDiaryBot:
         await update.message.reply_text("Current flow canceled.", reply_markup=self.main_menu_keyboard())
 
     async def set_reminder(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if await self.reject_if_unauthorized(update):
+            return
         if update.message is None or update.effective_user is None:
             return
 
@@ -181,6 +223,8 @@ class DreamDiaryBot:
         )
 
     async def clear_reminder(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if await self.reject_if_unauthorized(update):
+            return
         if update.message is None or update.effective_user is None:
             return
         job_name = f"daily_reminder_{update.effective_user.id}"
@@ -204,7 +248,7 @@ class DreamDiaryBot:
             await context.bot.send_message(chat_id=context.job.chat_id, text=message)
 
     async def weekly_exercise_reminder(self, context: ContextTypes.DEFAULT_TYPE) -> None:
-        users = self.db.get_users_with_chat_id()
+        users = self.reminder_targets()
         if not users:
             return
 
@@ -223,7 +267,7 @@ class DreamDiaryBot:
                 continue
 
     async def daytime_reality_check_reminder(self, context: ContextTypes.DEFAULT_TYPE) -> None:
-        users = self.db.get_users_with_chat_id()
+        users = self.reminder_targets()
         if not users:
             return
 
@@ -293,6 +337,8 @@ class DreamDiaryBot:
         return InlineKeyboardMarkup(keys)
 
     async def on_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if await self.reject_if_unauthorized(update):
+            return
         query = update.callback_query
         user = update.effective_user
         if query is None or user is None:
@@ -472,6 +518,8 @@ class DreamDiaryBot:
         await self.finish_entry(chat_id, bot, user_id)
 
     async def on_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if await self.reject_if_unauthorized(update):
+            return
         user = update.effective_user
         message = update.message
         if user is None or message is None:

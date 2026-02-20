@@ -64,6 +64,8 @@ Edit `.env`:
 - `OPENAI_MODEL` (default `gpt-4.1-mini`)
 - `MONGODB_URI`
 - `MONGODB_DB`
+- `ALLOWED_TELEGRAM_USER_ID` (optional but recommended: lock bot to your Telegram user ID)
+- `ALLOWED_CHAT_ID` (optional but recommended: lock bot to one chat ID)
 
 Alternative config location (recommended for servers):
 

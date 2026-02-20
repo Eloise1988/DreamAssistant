@@ -30,7 +30,18 @@ class Settings:
     mongodb_uri: str
     mongodb_db: str
     default_timezone: str
+    allowed_telegram_user_id: int | None
+    allowed_chat_id: int | None
 
+
+def _optional_int(name: str) -> int | None:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ValueError(f"Invalid {name}: expected integer value.") from exc
 
 
 def load_settings() -> Settings:
@@ -45,4 +56,6 @@ def load_settings() -> Settings:
         mongodb_uri=os.getenv("MONGODB_URI", "mongodb://localhost:27017").strip(),
         mongodb_db=os.getenv("MONGODB_DB", "dream_diary").strip(),
         default_timezone=os.getenv("DEFAULT_TIMEZONE", "UTC").strip(),
+        allowed_telegram_user_id=_optional_int("ALLOWED_TELEGRAM_USER_ID"),
+        allowed_chat_id=_optional_int("ALLOWED_CHAT_ID"),
     )
